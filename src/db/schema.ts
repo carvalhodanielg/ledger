@@ -1,0 +1,121 @@
+import { sql } from "drizzle-orm";
+import {
+  pgTable,
+  pgEnum,
+  uuid,
+  text,
+  bigint,
+  timestamp,
+  jsonb,
+  uniqueIndex,
+  index,
+  check,
+} from "drizzle-orm/pg-core";
+
+// ---------------------------------------------------------------------------
+// accounts
+// ---------------------------------------------------------------------------
+
+export const accountTypeEnum = pgEnum("account_type", [
+  "user",
+  "house",
+  "fee",
+  "suspense",
+]);
+
+export const accounts = pgTable("accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  type: accountTypeEnum("type").notNull(),
+  currency: text("currency").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// ---------------------------------------------------------------------------
+// transactions
+// ---------------------------------------------------------------------------
+
+export const transactionStatusEnum = pgEnum("transaction_status", [
+  "pending",
+  "posted",
+  "reversed",
+]);
+
+export const transactions = pgTable(
+  "transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    status: transactionStatusEnum("status").notNull().default("posted"),
+    // descrição livre de produto (ex: { type: "pix_payment", pixKey: "..." }).
+    // nunca guardar aqui algo do qual a lógica financeira dependa.
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("transactions_idempotency_key_idx").on(
+      table.idempotencyKey,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// entries
+// ---------------------------------------------------------------------------
+
+export const entryDirectionEnum = pgEnum("entry_direction", [
+  "debit",
+  "credit",
+]);
+
+export const entries = pgTable(
+  "entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "restrict" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "restrict" }),
+    direction: entryDirectionEnum("direction").notNull(),
+    // sempre positivo, em centavos. o sinal vem de `direction`, nunca do número.
+    amount: bigint("amount", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check("entries_amount_positive", sql`${table.amount} > 0`),
+    // toda leitura de saldo/extrato filtra por account_id + ordena por tempo —
+    // sem esse índice o Postgres varre a tabela inteira.
+    index("entries_account_id_created_at_idx").on(
+      table.accountId,
+      table.createdAt,
+    ),
+    index("entries_transaction_id_idx").on(table.transactionId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// balances — projeção/cache, NUNCA fonte de verdade.
+// Recalculável a qualquer momento como SUM(credit) - SUM(debit) das entries
+// daquela conta. Se este valor e a soma das entries divergirem, é bug — e é
+// exatamente esse recálculo que vira a rotina de reconciliação da Semana 5.
+// ---------------------------------------------------------------------------
+
+export const balances = pgTable("balances", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => accounts.id, { onDelete: "restrict" }),
+  // mesma unidade e mesmo risco de overflow que entries.amount — bigint.
+  currentBalance: bigint("current_balance", { mode: "number" })
+    .notNull()
+    .default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
