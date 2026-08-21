@@ -207,6 +207,129 @@ describe("GET /accounts/:id/balance", () => {
   });
 });
 
+describe("POST /transactions/:id/reverse", () => {
+  let accountA: Awaited<ReturnType<typeof createAccount>>;
+  let accountB: Awaited<ReturnType<typeof createAccount>>;
+  let originalId: string;
+
+  beforeEach(async () => {
+    accountA = await createAccount();
+    accountB = await createAccount();
+
+    const original = await request(app)
+      .post("/transactions")
+      .send({
+        idempotencyKey: "reverse-original-1",
+        entries: [
+          { accountId: accountA.id, direction: "debit", amount: 1000 },
+          { accountId: accountB.id, direction: "credit", amount: 1000 },
+        ],
+      });
+    originalId = original.body.transaction.id;
+  });
+
+  it("cria a transação espelhada e zera o saldo das contas envolvidas", async () => {
+    const res = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-1" });
+
+    expect(res.status).toBe(201);
+    expect(res.body.transaction.reversalOfTransactionId).toBe(originalId);
+    expect(res.body.entries).toHaveLength(2);
+
+    const [debitOriginal] = res.body.entries.filter(
+      (e: { accountId: string }) => e.accountId === accountA.id,
+    );
+    expect(debitOriginal.direction).toBe("credit");
+
+    const balanceA = await request(app).get(
+      `/accounts/${accountA.id}/balance`,
+    );
+    const balanceB = await request(app).get(
+      `/accounts/${accountB.id}/balance`,
+    );
+    expect(balanceA.body.balance).toBe(0);
+    expect(balanceB.body.balance).toBe(0);
+  });
+
+  it("não deixa reverter a mesma transação duas vezes com idempotencyKey diferente", async () => {
+    const first = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-2a" });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-2b" });
+
+    expect(second.status).toBe(409);
+    expect(second.body.error).toBe("transaction_already_reversed");
+    expect(second.body.details.reversalTransactionId).toBe(
+      first.body.transaction.id,
+    );
+  });
+
+  it("replay da mesma idempotencyKey devolve a mesma reversão, sem duplicar", async () => {
+    const first = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-3" });
+    expect(first.status).toBe(201);
+
+    const transactionsAfterFirst = await countRows("transactions");
+
+    const second = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-3" });
+
+    expect(second.status).toBe(200);
+    expect(second.body.transaction.id).toBe(first.body.transaction.id);
+    expect(await countRows("transactions")).toBe(transactionsAfterFirst);
+  });
+
+  it("permite reverter a própria reversão, voltando ao saldo original", async () => {
+    const reversal = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({ idempotencyKey: "reverse-4" });
+    expect(reversal.status).toBe(201);
+
+    const undoReversal = await request(app)
+      .post(`/transactions/${reversal.body.transaction.id}/reverse`)
+      .send({ idempotencyKey: "reverse-4-undo" });
+
+    expect(undoReversal.status).toBe(201);
+
+    const balanceA = await request(app).get(
+      `/accounts/${accountA.id}/balance`,
+    );
+    expect(balanceA.body.balance).toBe(-1000);
+  });
+
+  it("rejeita transação inexistente", async () => {
+    const res = await request(app)
+      .post("/transactions/00000000-0000-0000-0000-000000000000/reverse")
+      .send({ idempotencyKey: "reverse-5" });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("transaction_not_found");
+  });
+
+  it("rejeita id inválido", async () => {
+    const res = await request(app)
+      .post("/transactions/nao-uuid/reverse")
+      .send({ idempotencyKey: "reverse-6" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejeita body sem idempotencyKey", async () => {
+    const res = await request(app)
+      .post(`/transactions/${originalId}/reverse`)
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("GET /accounts/:id/statement", () => {
   it("acumula o saldo corrente na ordem correta", async () => {
     const accountA = await createAccount();

@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
   check,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,13 @@ export const transactions = pgTable(
     // descrição livre de produto (ex: { type: "pix_payment", pixKey: "..." }).
     // nunca guardar aqui algo do qual a lógica financeira dependa.
     metadata: jsonb("metadata"),
+    // presente só em transações de reversão, apontando pra transação
+    // original. NUNCA setado/editado na original — a imutabilidade é
+    // preservada porque só a transação nova sabe que é uma reversão.
+    reversalOfTransactionId: uuid("reversal_of_transaction_id").references(
+      (): AnyPgColumn => transactions.id,
+      { onDelete: "restrict" },
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -58,6 +66,12 @@ export const transactions = pgTable(
   (table) => [
     uniqueIndex("transactions_idempotency_key_idx").on(
       table.idempotencyKey,
+    ),
+    // NULL não colide com NULL numa unique index do Postgres — só barra
+    // duas linhas com o MESMO reversal_of_transaction_id não-nulo, ou seja,
+    // no máximo uma reversão por transação original.
+    uniqueIndex("transactions_reversal_of_unique_idx").on(
+      table.reversalOfTransactionId,
     ),
   ],
 );

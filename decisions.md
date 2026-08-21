@@ -318,3 +318,84 @@ qualquer `.ts` fora de `src/` capturado pelo include implícito
 `vitest.config.ts`). Adicionado `"include": ["src"]` — escopa o build
 pro que `rootDir`/`outDir` já pressupunham, e resolve de quebra o erro
 pré-existente do `drizzle.config.ts`.
+
+## 2026-08-20 — Reversão de transação: `POST /transactions/:id/reverse`
+
+**Contrato:** `POST /transactions/:id/reverse` com `{ idempotencyKey }` no
+body — reversão também muda dinheiro, então exige idempotency key como
+qualquer outra operação financeira do sistema.
+
+**Como a transação espelhada é montada:** carrega as `entries` da
+transação original e inverte `direction` de cada uma (debit↔credit),
+mantendo `accountId` e `amount`. Não reassert `assertIsBalanced` nas
+entries espelhadas — se a original balanceava (débito = crédito por
+definição, garantido na criação), a inversão balanceia por construção
+matemática; validar de novo seria checar algo que não pode dar errado.
+
+**Impedir reverter duas vezes — decisão de schema, não só de código:**
+adicionada a coluna `reversal_of_transaction_id` em `transactions`,
+auto-referenciando `transactions.id`, com `UNIQUE INDEX`. Ela vive na
+transação **nova** (a reversão), nunca é escrita na original — preserva
+100% a imutabilidade (`entries`/`transactions` originais nunca são
+tocadas). A garantia "no máximo uma reversão por transação" vem do banco,
+não de uma checagem em aplicação (mesma filosofia do
+`transactions_idempotency_key_idx`): checar-antes-de-inserir teria a
+mesma race condition de duas requisições concorrentes passando pela
+checagem antes de qualquer uma commitar.
+
+**Detalhe não-óbvio da constraint:** a coluna é nullable (a maioria das
+transações não é reversão de nada) e o Postgres trata `NULL` como "não
+igual a nada" em `UNIQUE` — múltiplas linhas com
+`reversal_of_transaction_id = NULL` não colidem entre si. Só duas linhas
+com o mesmo valor não-nulo violam a constraint.
+
+**Desambiguação no catch do unique violation:** o insert da reversão pode
+colidir em DUAS constraints diferentes — `idempotency_key` (retry do
+mesmo request) ou `reversal_of_transaction_id` (tentativa genuína de
+reverter algo já revertido, com uma idempotencyKey nova). Não confiamos em
+qual das duas o Postgres reporta primeiro (não é determinístico do ponto
+de vista da aplicação), então o catch checa as duas hipóteses
+explicitamente, nessa ordem: (1) existe uma transação com essa
+`idempotencyKey`? Se sim, é replay — devolve ela com `200`. (2) Senão,
+existe uma reversão já registrada pra essa transação original? Se sim, é
+uma tentativa de reverter duas vezes — `409 transaction_already_reversed`,
+com o id da reversão existente no corpo, pra o cliente poder consultá-la.
+
+**Decisão deliberadamente não tomada — reverter uma reversão:** o sistema
+não impede reverter a transação de reversão em si (isso "desfaz o
+desfazer" e volta o saldo ao estado antes da reversão original). Não há
+pedido do roadmap pra bloquear isso, e tecnicamente é uma operação válida
+de partida dobrada — bloquear seria adicionar regra de negócio não pedida.
+Testado manualmente: reverter a reversão devolveu o saldo exatamente ao
+estado da transação original.
+
+**Bug encontrado e corrigido durante o teste manual:** `scripts/setup-test-db.ts`
+(criado pelo subagente da suíte de testes) tinha o nome da migration
+`0000_overjoyed_skaar.sql` hardcoded, em vez de aplicar todos os arquivos
+de `drizzle/` em ordem. A migration nova (`0001_certain_sersi.sql`, que
+adiciona `reversal_of_transaction_id`) nunca rodava no banco de teste,
+fazendo 4 dos 21 testes falharem com "column ... does not exist". Corrigido
+pra listar e aplicar todo `.sql` de `drizzle/` ordenado por nome — o mesmo
+problema voltaria a acontecer a cada nova migration se não fosse corrigido
+na raiz.
+
+Testado manualmente: criar transação (saldo -1000/+1000) → reverter
+(saldo volta a 0, entries espelhadas com direção invertida) → tentar
+reverter de novo com idempotencyKey diferente (409) → repetir a mesma
+chamada de reversão com a mesma idempotencyKey (200, mesma transação,
+sem duplicar) → transação inexistente (404) → body sem idempotencyKey
+(400).
+
+## 2026-08-21 — Testes de `POST /transactions/:id/reverse`
+
+7 testes de integração novos em `routes.test.ts`, mesmo padrão dos
+existentes (supertest contra `app`, banco `ledger_test` real): cria a
+reversão e zera o saldo das duas contas; entries espelhadas com direção
+invertida; segunda tentativa de reverter com `idempotencyKey` diferente
+→ 409 `transaction_already_reversed` (com o id da reversão existente no
+corpo); replay com a mesma `idempotencyKey` → 200, sem criar linha nova
+(conferido via `countRows`); reverter a própria reversão → permitido,
+saldo volta ao estado da transação original; transação inexistente → 404;
+id inválido → 400; body sem `idempotencyKey` → 400.
+
+Suíte total: 28 testes passando.

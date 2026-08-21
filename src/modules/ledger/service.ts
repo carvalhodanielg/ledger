@@ -126,6 +126,93 @@ export async function createTransaction(input: CreateTransactionInput) {
   }
 }
 
+export async function reverseTransaction(
+  originalTransactionId: string,
+  idempotencyKey: string,
+) {
+  const original = await db.query.transactions.findFirst({
+    where: eq(transactions.id, originalTransactionId),
+  });
+
+  if (!original) {
+    throw new AppError(404, "transaction_not_found", {
+      transactionId: originalTransactionId,
+    });
+  }
+
+  const originalEntries = await db.query.entries.findMany({
+    where: eq(entries.transactionId, original.id),
+  });
+
+  try {
+    return await db.transaction(async (tx) => {
+      const [reversal] = await tx
+        .insert(transactions)
+        .values({
+          idempotencyKey,
+          reversalOfTransactionId: original.id,
+          metadata: { reversalOf: original.id },
+        })
+        .returning();
+
+      if (!reversal) {
+        throw new Error("insert de transaction (reversão) não retornou linha");
+      }
+
+      // espelha cada entry original invertendo a direção — se a original
+      // balanceava (débito = crédito), a inversão balanceia por construção,
+      // não precisa reassertar.
+      const mirroredEntries = await tx
+        .insert(entries)
+        .values(
+          originalEntries.map((entry) => ({
+            transactionId: reversal.id,
+            accountId: entry.accountId,
+            direction:
+              entry.direction === "debit"
+                ? ("credit" as const)
+                : ("debit" as const),
+            amount: entry.amount,
+          })),
+        )
+        .returning();
+
+      await applyBalanceDeltas(tx, mirroredEntries);
+
+      return { transaction: reversal, entries: mirroredEntries, replayed: false };
+    });
+  } catch (err) {
+    if (!isUniqueViolation(err)) {
+      throw err;
+    }
+
+    // duas UNIQUE constraints podem ter disparado esse erro (idempotencyKey
+    // ou reversalOfTransactionId) — não confiamos em qual delas o Postgres
+    // reportou primeiro, então checamos as duas hipóteses explicitamente.
+    const replay = await db.query.transactions.findFirst({
+      where: eq(transactions.idempotencyKey, idempotencyKey),
+    });
+    if (replay) {
+      const replayEntries = await db.query.entries.findMany({
+        where: eq(entries.transactionId, replay.id),
+      });
+      return { transaction: replay, entries: replayEntries, replayed: true };
+    }
+
+    const existingReversal = await db.query.transactions.findFirst({
+      where: eq(transactions.reversalOfTransactionId, original.id),
+    });
+    if (existingReversal) {
+      throw new AppError(409, "transaction_already_reversed", {
+        transactionId: original.id,
+        reversalTransactionId: existingReversal.id,
+      });
+    }
+
+    throw err;
+  }
+}
+
 // Não confiamos em "checar antes de inserir" — duas requisições concorrentes
 // com a mesma idempotencyKey passariam pela checagem antes de qualquer uma
 // commitar. A UNIQUE constraint no banco é o árbitro real; aqui só reagimos

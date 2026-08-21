@@ -1,0 +1,3 @@
+ALTER TABLE "transactions" ADD COLUMN "reversal_of_transaction_id" uuid;--> statement-breakpoint
+ALTER TABLE "transactions" ADD CONSTRAINT "transactions_reversal_of_transaction_id_transactions_id_fk" FOREIGN KEY ("reversal_of_transaction_id") REFERENCES "public"."transactions"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "transactions_reversal_of_unique_idx" ON "transactions" USING btree ("reversal_of_transaction_id");

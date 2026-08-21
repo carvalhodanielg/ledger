@@ -4,8 +4,13 @@ import {
   createTransaction,
   getAccountBalance,
   getAccountStatement,
+  reverseTransaction,
 } from "./service.js";
-import { parseCreateTransactionInput, UUID_RE } from "./validate.js";
+import {
+  parseCreateTransactionInput,
+  parseReverseTransactionInput,
+  UUID_RE,
+} from "./validate.js";
 
 export const ledgerRouter = Router();
 
@@ -18,6 +23,25 @@ ledgerRouter.post("/transactions", async (req, res, next) => {
     //replayed so acontece caso aconteça algo entre gravar a transacao no banco + entry 
     //cliente envia denovo o mesmo idempootencyKey, recebe 200 pra identificar que aquela transação ja aconteceu anteriormente
     
+    res.status(result.replayed ? 200 : 201).json({
+      transaction: result.transaction,
+      entries: result.entries,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+ledgerRouter.post("/transactions/:id/reverse", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!id || !UUID_RE.test(id)) {
+      throw new AppError(400, "invalid_request", "id precisa ser um uuid");
+    }
+
+    const { idempotencyKey } = parseReverseTransactionInput(req.body);
+    const result = await reverseTransaction(id, idempotencyKey);
+
     res.status(result.replayed ? 200 : 201).json({
       transaction: result.transaction,
       entries: result.entries,

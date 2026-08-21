@@ -48,6 +48,22 @@ export function parseCreateTransactionInput(
   return { idempotencyKey, entries: parsedEntries, metadata };
 }
 
+export function parseReverseTransactionInput(body: unknown): {
+  idempotencyKey: string;
+} {
+  if (typeof body !== "object" || body === null) {
+    throw new AppError(400, "invalid_request", "body precisa ser um objeto");
+  }
+
+  const { idempotencyKey } = body as Record<string, unknown>;
+
+  if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
+    throw new AppError(400, "invalid_request", "idempotencyKey é obrigatório");
+  }
+
+  return { idempotencyKey };
+}
+
 function parseEntry(entry: unknown, index: number): EntryInput {
   if (typeof entry !== "object" || entry === null) {
     throw new AppError(400, "invalid_request", `entries[${index}] inválida`);

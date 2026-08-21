@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
@@ -25,19 +25,23 @@ await admin.unsafe(`CREATE DATABASE "${dbName}"`);
 await admin.end();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const migrationPath = join(
-  __dirname,
-  "..",
-  "drizzle",
-  "0000_overjoyed_skaar.sql",
-);
-const migrationSql = readFileSync(migrationPath, "utf-8");
+const drizzleDir = join(__dirname, "..", "drizzle");
+
+// aplica TODAS as migrations em drizzle/, em ordem — nunca hardcoda um
+// arquivo específico, senão o banco de teste fica preso no schema do dia
+// em que esse script foi escrito.
+const migrationFiles = readdirSync(drizzleDir)
+  .filter((file) => file.endsWith(".sql"))
+  .sort();
 
 const db = postgres(testUrl);
-for (const statement of migrationSql.split("--> statement-breakpoint")) {
-  const trimmed = statement.trim();
-  if (trimmed) {
-    await db.unsafe(trimmed);
+for (const file of migrationFiles) {
+  const migrationSql = readFileSync(join(drizzleDir, file), "utf-8");
+  for (const statement of migrationSql.split("--> statement-breakpoint")) {
+    const trimmed = statement.trim();
+    if (trimmed) {
+      await db.unsafe(trimmed);
+    }
   }
 }
 await db.end();
