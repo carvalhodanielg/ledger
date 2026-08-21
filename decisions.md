@@ -267,3 +267,54 @@ direções opostas. Ordenar sempre pela mesma chave (aqui, `accountId`
 alfabético) é a técnica padrão pra eliminar deadlock por ordem de lock
 trocada: garante que todo mundo pede recursos compartilhados na mesma
 sequência.
+
+## 2026-08-20 — Suíte de testes: vitest + TRUNCATE entre testes + banco `ledger_test` dedicado
+
+**vitest em vez de `node:test` nativo:** `node:test` evitaria mais uma
+dependência (mesma lógica que levou a preferir `--env-file` do Node em vez
+de `dotenv`), mas vitest tem watch mode com re-run automático por arquivo
+mudado, mensagens de assertion mais legíveis, e integra sem fricção com
+`tsx`/ESM do jeito que o projeto já está montado. Como a suíte vai crescer
+bastante nas próximas semanas (concorrência, Pix, reconciliação), a
+melhor DX de vitest pesou mais que economizar uma dependência aqui — ao
+contrário do caso do `--env-file`, que trocava uma dependência por *zero*
+ganho de produtividade.
+
+**TRUNCATE entre testes em vez de rollback de transação:**
+`createTransaction` (em `service.ts`) já abre sua própria `db.transaction`
+internamente. Se o isolamento entre testes também fosse via transação com
+`ROLLBACK`, o código sob teste precisaria rodar *dentro* dessa transação
+externa — o que exigiria mudar `service.ts` pra aceitar a conexão/`tx`
+como parâmetro em vez de importar `db` global, só para acomodar teste.
+`TRUNCATE TABLE ... RESTART IDENTITY CASCADE` no `beforeEach` (em
+`src/test/setup.ts`) resolve o isolamento sem tocar no código de produção:
+cada teste começa com as quatro tabelas vazias, usando o `db`/`sql`
+exportados normalmente por `src/db/client.ts`. Custo: um pouco mais lento
+que rollback, e os testes de integração rodam sequenciais
+(`fileParallelism: false` no `vitest.config.ts`), já que compartilham o
+mesmo banco e um `TRUNCATE` no meio de outro teste corromperia o
+resultado. Pra suíte desse tamanho isso não importa na prática (~2s pra
+21 testes).
+
+**Banco `ledger_test` dedicado, no mesmo container do `docker-compose.yml`:**
+não um serviço Postgres separado — só outro banco lógico na mesma
+instância que já sobe com `docker compose up -d`. `scripts/setup-test-db.ts`
+roda como `pretest` (o `npm` chama automaticamente antes de `test`,
+sem passo manual): conecta no banco `postgres` (não dá pra `DROP` o banco
+em que a própria conexão está), faz `DROP DATABASE IF EXISTS ledger_test
+WITH (FORCE)` seguido de `CREATE DATABASE`, e aplica a migration atual
+(`drizzle/0000_overjoyed_skaar.sql`) direto. Recriar do zero a cada rodada
+— em vez de só reusar um banco de teste já existente — evita o schema de
+teste ficar desatualizado em relação a `drizzle/` depois de mudanças no
+`src/db/schema.ts`. `.env.test` (committado, sem segredo — mesmas
+credenciais fixas do `docker-compose.yml`) aponta `DATABASE_URL` pra esse
+banco; `npm test` carrega esse arquivo com `--env-file`, mesma técnica já
+usada em `dev`/`start`.
+
+**Efeito colateral corrigido:** o `tsconfig.json` não tinha `include`, e o
+`rootDir: "src"` fazia o `tsc` padrão (`npm run build`) falhar em
+qualquer `.ts` fora de `src/` capturado pelo include implícito
+(`drizzle.config.ts`, e agora também `scripts/setup-test-db.ts` e
+`vitest.config.ts`). Adicionado `"include": ["src"]` — escopa o build
+pro que `rootDir`/`outDir` já pressupunham, e resolve de quebra o erro
+pré-existente do `drizzle.config.ts`.

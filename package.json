@@ -7,7 +7,8 @@
     "dev": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "pretest": "tsx --env-file=.env.test scripts/setup-test-db.ts",
+    "test": "node --env-file=.env.test node_modules/vitest/vitest.mjs run"
   },
   "keywords": [],
   "author": "",
@@ -16,9 +17,12 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
+    "@types/supertest": "^7.2.1",
     "drizzle-kit": "^0.31.10",
+    "supertest": "^7.2.2",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
