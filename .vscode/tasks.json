@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "db: reset test database",
+      "type": "shell",
+      "command": "npx tsx --env-file=.env.test scripts/setup-test-db.ts",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
