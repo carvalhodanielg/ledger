@@ -47,3 +47,7 @@ créditos, sempre — garantida em código e em constraint de banco.
 
 Se o tempo apertar, corta a fase 3 (Pix) antes de cortar qualquer coisa da
 fase 2 (concorrência) — o teste de concorrência é o que prova o projeto.
+
+
+## Decisions
+Todas as decisões importantes durante o projeto devem ser armazendas em um decisions.md, isso deve vir de perguntas importantes, coisas cruciais para o projeto, modelagem de dados, etc. 
