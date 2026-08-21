@@ -108,7 +108,15 @@ concorrentes e prova, com números, que nada vaza nem duplica.
 ### Dias 1-2 — Reproduzir o problema antes de resolver
 
 Não implemente proteção nenhuma ainda. Escreva o script de concorrência
-primeiro e rode contra o que você já tem.
+primeiro e rode contra o que já tem.
+
+Não use uma ferramenta de load test (k6, etc.) pra isso — o que você
+precisa provar é uma propriedade de correção (nenhuma conta fica
+negativa, soma do sistema não muda) sob um padrão específico de
+concorrência, não throughput/latência sob carga. Um script com
+`Promise.all` disparando as requisições, seguido de asserts direto no
+banco, cabe como teste de integração normal na sua suíte (Vitest) e roda
+em CI — uma ferramenta de load test externa perde essa integração.
 
 **Descubra:**
 - Dispare 50 transferências simultâneas saindo da mesma conta, cada uma
@@ -120,6 +128,15 @@ primeiro e rode contra o que você já tem.
 **Pronto quando:** você tem, documentado (print ou log salvo), um caso
 reproduzível de saldo ficando incorreto sob concorrência. É o objeto de
 comparação do antes/depois no README.
+
+**Fundamental pra Semana 5:** faça o script emitir o resultado como dado
+estruturado (JSON), não só texto solto no terminal — número de
+requisições disparadas, quantas resultaram em conta negativa, saldo final
+de cada conta envolvida, soma total do sistema antes/depois. Rode e salve
+esse JSON tanto pro cenário sem proteção (Dias 1-2) quanto pro cenário
+protegido (Dias 3-4). É esse par de arquivos que vira o gráfico
+antes/depois na Semana 5 — sem dado estruturado agora, não dá pra montar
+isso depois sem rodar tudo de novo.
 
 ### Dias 3-4 — Escolher e implementar uma proteção
 
@@ -226,9 +243,20 @@ O que precisa estar lá:
   Y execuções resultaram em saldo negativo; com a proteção implementada, 0
   de 1000"
 
+**Fundamental — visual do antes/depois pra apresentar o projeto:** o
+número em texto no README já é suficiente como evidência técnica, mas se
+o objetivo é *apresentar* o projeto pra alguém (entrevista, portfólio,
+demo), vale transformar o par de JSONs salvos na Semana 3 (sem proteção /
+com proteção) num gráfico simples — ex: barras comparando quantas
+transferências causaram saldo negativo em cada cenário. Não é código
+novo do ledger, é só uma etapa de "empacotamento" do resultado real que
+o script já produziu; não faça isso antes de ter os números de verdade
+em mãos.
+
 **Pronto quando:** alguém de fora consegue clonar o repo, rodar `docker
 compose up`, rodar o script de concorrência, e ver o resultado com os
-próprios olhos.
+próprios olhos — e existe uma versão visual desse resultado pronta pra
+mostrar numa apresentação, não só números soltos no terminal.
 
 ---
 
