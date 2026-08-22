@@ -1,17 +1,8 @@
 import request from "supertest";
 import { beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../app.js";
-import { db, sql } from "../../db/client.js";
-import { accounts } from "../../db/schema.js";
-
-async function createAccount(currency = "BRL") {
-  const [account] = await db
-    .insert(accounts)
-    .values({ type: "user", currency })
-    .returning();
-  if (!account) throw new Error("falha ao criar conta de teste");
-  return account;
-}
+import { sql } from "../../db/client.js";
+import { createAccount, fundAccount } from "../../test/fixtures.js";
 
 async function countRows(table: "transactions" | "entries") {
   const [row] = await sql<{ count: string }[]>`select count(*) from ${sql(table)}`;
@@ -28,6 +19,8 @@ describe("POST /transactions", () => {
   });
 
   it("cria uma transação balanceada e persiste no banco", async () => {
+    await fundAccount(accountA.id, 1000);
+
     const res = await request(app)
       .post("/transactions")
       .send({
@@ -75,6 +68,8 @@ describe("POST /transactions", () => {
   });
 
   it("replay da mesma idempotencyKey devolve a transação original, sem duplicar", async () => {
+    await fundAccount(accountA.id, 500);
+
     const body = {
       idempotencyKey: "replay-1",
       entries: [
@@ -140,7 +135,40 @@ describe("POST /transactions", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejeita débito maior que o saldo disponível", async () => {
+    const res = await request(app)
+      .post("/transactions")
+      .send({
+        idempotencyKey: "insufficient-funds-1",
+        entries: [
+          { accountId: accountA.id, direction: "debit", amount: 1000 },
+          { accountId: accountB.id, direction: "credit", amount: 1000 },
+        ],
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("insufficient_funds");
+  });
+
+  it("permite débito quando o saldo cobre o valor", async () => {
+    await fundAccount(accountA.id, 2000);
+
+    const res = await request(app)
+      .post("/transactions")
+      .send({
+        idempotencyKey: "insufficient-funds-2",
+        entries: [
+          { accountId: accountA.id, direction: "debit", amount: 1000 },
+          { accountId: accountB.id, direction: "credit", amount: 1000 },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+  });
+
   it("atualiza balances em sincronia com as entries", async () => {
+    await fundAccount(accountA.id, 700);
+
     await request(app)
       .post("/transactions")
       .send({
@@ -171,6 +199,7 @@ describe("GET /accounts/:id/balance", () => {
   it("bate com a soma manual das entries", async () => {
     const accountA = await createAccount();
     const accountB = await createAccount();
+    await fundAccount(accountA.id, 1200);
 
     await request(app)
       .post("/transactions")
@@ -215,6 +244,7 @@ describe("POST /transactions/:id/reverse", () => {
   beforeEach(async () => {
     accountA = await createAccount();
     accountB = await createAccount();
+    await fundAccount(accountA.id, 5000);
 
     const original = await request(app)
       .post("/transactions")
@@ -248,7 +278,7 @@ describe("POST /transactions/:id/reverse", () => {
     const balanceB = await request(app).get(
       `/accounts/${accountB.id}/balance`,
     );
-    expect(balanceA.body.balance).toBe(0);
+    expect(balanceA.body.balance).toBe(5000);
     expect(balanceB.body.balance).toBe(0);
   });
 
@@ -301,7 +331,7 @@ describe("POST /transactions/:id/reverse", () => {
     const balanceA = await request(app).get(
       `/accounts/${accountA.id}/balance`,
     );
-    expect(balanceA.body.balance).toBe(-1000);
+    expect(balanceA.body.balance).toBe(4000);
   });
 
   it("rejeita transação inexistente", async () => {
@@ -334,6 +364,7 @@ describe("GET /accounts/:id/statement", () => {
   it("acumula o saldo corrente na ordem correta", async () => {
     const accountA = await createAccount();
     const accountB = await createAccount();
+    await fundAccount(accountA.id, 2000);
 
     await request(app)
       .post("/transactions")
@@ -365,9 +396,9 @@ describe("GET /accounts/:id/statement", () => {
 
     const res = await request(app).get(`/accounts/${accountA.id}/statement`);
     expect(res.status).toBe(200);
-    expect(res.body.entries).toHaveLength(3);
+    expect(res.body.entries).toHaveLength(4);
     expect(res.body.entries.map((e: { runningBalance: number }) => e.runningBalance)).toEqual([
-      -1000, -1300, -1150,
+      2000, 1000, 700, 850,
     ]);
   });
 });

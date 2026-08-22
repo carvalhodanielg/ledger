@@ -1,0 +1,1 @@
+ALTER TABLE "balances" ADD CONSTRAINT "balances_current_balance_non_negative" CHECK ("balances"."current_balance" >= 0);

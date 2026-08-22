@@ -1,0 +1,12 @@
+{
+  "scenario": "for-update-plus-check-constraint",
+  "requestsFired": 50,
+  "succeeded": 33,
+  "rejected": 17,
+  "otherStatusCodes": [],
+  "finalBalanceSource": 1000,
+  "finalBalanceDestination": 99000,
+  "systemDebitTotal": 199000,
+  "systemCreditTotal": 199000,
+  "wentNegative": false
+}

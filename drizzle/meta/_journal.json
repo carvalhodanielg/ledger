@@ -15,6 +15,13 @@
       "when": 1787274985885,
       "tag": "0001_certain_sersi",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787281065756,
+      "tag": "0002_amused_angel",
+      "breakpoints": true
     }
   ]
 }

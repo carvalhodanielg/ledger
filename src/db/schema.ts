@@ -121,15 +121,27 @@ export const entries = pgTable(
 // exatamente esse recálculo que vira a rotina de reconciliação da Semana 5.
 // ---------------------------------------------------------------------------
 
-export const balances = pgTable("balances", {
-  accountId: uuid("account_id")
-    .primaryKey()
-    .references(() => accounts.id, { onDelete: "restrict" }),
-  // mesma unidade e mesmo risco de overflow que entries.amount — bigint.
-  currentBalance: bigint("current_balance", { mode: "number" })
-    .notNull()
-    .default(0),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
+export const balances = pgTable(
+  "balances",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => accounts.id, { onDelete: "restrict" }),
+    // mesma unidade e mesmo risco de overflow que entries.amount — bigint.
+    currentBalance: bigint("current_balance", { mode: "number" })
+      .notNull()
+      .default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Segunda camada de proteção contra saldo negativo (Semana 3, Dias
+    // 3-4) — independente do `SELECT ... FOR UPDATE` em `createTransaction`
+    // estar certo. `balances` não é fonte de verdade, mas É atualizada no
+    // MESMO commit das entries (applyBalanceDeltas), então essa constraint
+    // barra o COMMIT de qualquer caminho de código (presente ou futuro) que
+    // deixe a soma das entries de uma conta ir negativa.
+    check("balances_current_balance_non_negative", sql`${table.currentBalance} >= 0`),
+  ],
+);

@@ -399,3 +399,134 @@ saldo volta ao estado da transação original; transação inexistente → 404;
 id inválido → 400; body sem `idempotencyKey` → 400.
 
 Suíte total: 28 testes passando.
+
+## 2026-08-20 — Semana 3, Dias 1-2: checagem de saldo ingênua + script de concorrência
+
+**Contexto:** antes desta mudança, `createTransaction` não tinha nenhuma
+checagem de saldo — só validava débito == crédito dentro da própria
+transação. Uma conta podia ficar arbitrariamente negativa com uma única
+chamada sequencial, sem precisar de concorrência nenhuma. Pra Semana 3 do
+roadmap fazer sentido (demonstrar que concorrência quebra uma checagem que
+funcionaria sequencialmente), era preciso primeiro existir uma regra de
+"saldo suficiente" pra quebrar.
+
+**Decisão:** adicionada `assertSufficientFunds` em `service.ts`, ingênua e
+propositalmente sem proteção: lê o saldo (`getAccountBalance`, que soma
+`entries`), decide, e só depois grava — em passos separados (TOCTOU:
+time-of-check-to-time-of-use). Rejeita com `422 insufficient_funds`. Essa
+falta de proteção é intencional — é o objeto que o script de concorrência
+da Semana 3 Dias 3-4 vai substituir por `SELECT ... FOR UPDATE` ou
+constraint de banco.
+
+**Bug descoberto ao escrever os testes:** a checagem de saldo rodava em
+toda chamada de `createTransaction`, inclusive replays de
+`idempotencyKey` repetida. Isso quebrava idempotência genuína: se a
+primeira chamada consumia o saldo todo, a segunda chamada (mesma
+`idempotencyKey`, deveria só devolver o resultado já commitado) era
+rejeitada por saldo insuficiente antes mesmo de chegar no
+`try`/`catch` que trata o unique violation. Corrigido movendo a checagem de
+replay (`tryLoadByIdempotencyKey`) pro topo da função, antes de qualquer
+validação de negócio — replay nunca deveria re-rodar regra nenhuma, só
+devolver o que já existe.
+
+**Testes existentes quebrados pela checagem nova:** quase toda a suíte de
+`routes.test.ts` debitava contas recém-criadas (saldo zero) sem fundá-las
+antes. Criado helper `fundAccount` em `src/test/fixtures.ts` (extraído
+junto com `createAccount`, compartilhado entre `routes.test.ts` e
+`concurrency.test.ts`) que credita a conta direto no banco via uma conta
+`house` descartável, bypassando a rota HTTP — decisão deliberada, porque
+fundar a conta *através* da API entraria na mesma checagem de saldo
+insuficiente (a conta `house` também começaria em zero). Os testes que
+tinham valores de saldo hardcoded (`0`, `-1000` etc.) foram recalculados
+pra refletir o saldo fundado.
+
+**Script de concorrência** (`src/modules/ledger/concurrency.test.ts`):
+dispara 50 débitos concorrentes (`Promise.all`) da mesma conta, cada um de
+R$30 — individualmente cabe num saldo de R$1000, mas 50x (R$1500) excede.
+Não usa ferramenta de load test externa — é um teste de integração normal
+(Vitest, supertest contra `app`, banco `ledger_test` real), com asserts
+direto no banco (`entries`), não nas respostas HTTP. Emite o resultado como
+JSON estruturado em `scripts/concurrency-results/unprotected.json`
+(requisições disparadas, aceitas, rejeitadas, saldo final de cada conta,
+soma de débitos/créditos do sistema) — vira a metade "antes" do gráfico
+comparativo da Semana 5.
+
+Duas propriedades checadas, com naturezas bem diferentes:
+- `systemDebitTotal === systemCreditTotal` — vale SEMPRE, com ou sem
+  proteção, porque toda transação aceita é balanceada por construção
+  (`assertIsBalanced`, desde a Semana 1). Não é o que a Semana 3 testa.
+- `finalBalanceSource >= 0` — a propriedade real sob teste. Roda
+  vermelha (comportamento esperado agora): em rodadas observadas, saldo
+  final ficou entre -38000 e -50000 centavos, com 46-50 das 50
+  requisições aceitas (não-determinístico, número muda a cada rodada,
+  exatamente como o roadmap antecipa). Fica assim até a Semana 3 Dias 3-4
+  trocar `assertSufficientFunds` por lock ou constraint — nesse momento o
+  mesmo teste (só o `scenario` no JSON muda) deve ficar verde de forma
+  consistente.
+
+Suíte total: 32 testes (31 passando, 1 vermelho por design —
+`concurrency.test.ts`).
+
+## 2026-08-21 — Semana 3, Dias 3-4: `SELECT ... FOR UPDATE` + constraint de banco
+
+**Decisão:** as duas camadas, não uma ou outra.
+
+1. **Lock de aplicação:** `assertSufficientFunds` virou
+   `assertSufficientFundsLocked`, movida pra dentro da mesma
+   `db.transaction` de `createTransaction`. Faz `SELECT current_balance
+   FROM balances WHERE account_id = X FOR UPDATE` pra cada conta debitada
+   (ordenado por `accountId`, mesma ordem de `applyBalanceDeltas`, pra não
+   inverter a ordem de lock entre duas transações concorrentes tocando as
+   mesmas contas — deadlock). Leitura e decisão ficam na mesma janela
+   travada: uma segunda transação tentando debitar a mesma conta espera
+   até essa transação commitar ou dar rollback, não lê mais um saldo
+   desatualizado.
+2. **Constraint de banco:** `CHECK (current_balance >= 0)` em
+   `balances.current_balance` (migration `0002_amused_angel.sql`) — rede de
+   segurança que não depende do lock em (1) estar certo.
+
+**Bug de produção descoberto ao testar a constraint:** `applyBalanceDeltas`
+usava `INSERT ... ON CONFLICT (account_id) DO UPDATE` como upsert. Isso
+QUEBROU com o `CHECK` novo — pegadinha não-óbvia do Postgres: em
+`ON CONFLICT DO UPDATE`, o `CHECK` é validado contra o valor **literal** do
+`VALUES()` durante a tentativa especulativa de INSERT, **antes** de resolver
+se é conflito. Um débito de conta com saldo alto (`delta` negativo, mas
+`current_balance + delta` final positivo) falhava o `CHECK` na tentativa de
+inserir o `delta` bruto como se fosse linha nova — mesmo já existindo a
+linha e o resultado final sendo válido. Reproduzido isolado (script
+descartável fora do commit) antes de mexer no código: com uma linha de
+`balances` já existente com saldo grande, `INSERT (delta=-2000) ON CONFLICT
+DO UPDATE SET current_balance = current_balance + delta` falhava com
+`23514 check_violation`, não com o UPDATE bem-sucedido esperado.
+
+**Correção:** trocado o padrão upsert por UPDATE-primeiro,
+INSERT-só-se-não-existir (`applyBalanceDelta` em `service.ts`, espelhada
+em `applyDelta` de `src/test/fixtures.ts`, usada por `fundAccount`). O
+`CHECK` agora valida o valor já somado (`current_balance + delta`) no
+`UPDATE`, que é o que importa — o `INSERT` só acontece pra conta sem linha
+ainda em `balances`, e só é alcançado com delta negativo se
+`assertSufficientFundsLocked` tiver um bug (conta sem linha tem saldo
+implícito 0, que já rejeitaria qualquer débito antes de chegar aqui).
+
+**`fundAccount` (fixture de teste) também teve que mudar:** a conta
+`house` usada pra fundar contas de teste é debitada (delta negativo) pra
+creditar a conta-alvo. Antes da constraint, isso não importava; depois,
+precisou de um saldo inicial artificial grande
+(`HOUSE_SEED_BALANCE = 1_000_000_000_00`) escrito direto, fora do motor de
+transação — documentado no código como bypass deliberado, sem
+correspondência em entries pra essa conta (não há teste que reconcilie a
+conta house contra suas entries).
+
+**Resultado do script de concorrência** (`concurrency.test.ts`, mesmo
+arquivo dos Dias 1-2, resultado agora salvo em
+`scripts/concurrency-results/protected.json`, mantendo
+`unprotected.json` como evidência do "antes"): rodado 6+ vezes seguidas,
+sempre com o mesmo resultado — 33 das 50 requisições aceitas, 17
+rejeitadas com `422 insufficient_funds`, saldo final da conta de origem
+R$1000,00 - 33×R$30,00 = R$10,00 (nunca negativo). Determinístico agora,
+ao contrário do "antes" (que variava entre 46-50 aceitas por rodada) —
+esperado: o lock serializa as 50 requisições concorrentes numa fila, então
+sempre processa na mesma ordem relativa e sempre para no mesmo ponto.
+
+Suíte total: 32 testes passando (o antes vermelho-por-design agora fica
+verde de forma consistente).

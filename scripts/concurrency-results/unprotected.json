@@ -1,0 +1,12 @@
+{
+  "scenario": "unprotected-naive-check",
+  "requestsFired": 50,
+  "succeeded": 50,
+  "rejected": 0,
+  "otherStatusCodes": [],
+  "finalBalanceSource": -50000,
+  "finalBalanceDestination": 150000,
+  "systemDebitTotal": 250000,
+  "systemCreditTotal": 250000,
+  "wentNegative": true
+}

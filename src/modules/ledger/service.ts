@@ -5,6 +5,7 @@ import { AppError } from "../../http/error-handler.js";
 import type { CreateTransactionInput } from "./validate.js";
 
 const UNIQUE_VIOLATION = "23505";
+const CHECK_VIOLATION = "23514";
 
 async function loadAccountOrThrow(accountId: string) {
   const [account] = await db
@@ -85,11 +86,30 @@ export async function getAccountStatement(
 }
 
 export async function createTransaction(input: CreateTransactionInput) {
+  // replay: se a idempotencyKey já existe, devolve o resultado original sem
+  // re-rodar validação de negócio. Sem isso, uma segunda chamada idêntica
+  // podia ser rejeitada por saldo insuficiente mesmo já tendo sido aceita
+  // da primeira vez (o primeiro débito já consumiu o saldo que o segundo
+  // "veria" ao checar de novo) — replay deixaria de ser idempotente.
+  const existing = await tryLoadByIdempotencyKey(input.idempotencyKey);
+  if (existing) {
+    return existing;
+  }
+
   await assertAccountsAreValid(input.entries);
   assertIsBalanced(input.entries);
 
   try {
     return await db.transaction(async (tx) => {
+      // Trava a linha de `balances` de cada conta debitada (em ordem
+      // consistente de accountId, igual `applyBalanceDeltas`, pra não
+      // deadlockar contra outra transação que toque as mesmas contas) e só
+      // então decide se há saldo. Diferente da versão anterior (que lia o
+      // saldo FORA da transação, antes de qualquer lock existir), aqui a
+      // leitura e a escrita ficam na mesma janela travada — nenhuma outra
+      // transação consegue ler um saldo "stale" enquanto essa não commita.
+      await assertSufficientFundsLocked(tx, input.entries);
+
       const [transaction] = await tx
         .insert(transactions)
         .values({
@@ -121,6 +141,16 @@ export async function createTransaction(input: CreateTransactionInput) {
   } catch (err) {
     if (isUniqueViolation(err)) {
       return await loadByIdempotencyKey(input.idempotencyKey);
+    }
+    if (isCheckViolation(err)) {
+      // Segunda camada (Semana 3, Dias 3-4): mesmo que o lock acima tenha
+      // um bug, a constraint `balances_current_balance_non_negative` recusa
+      // o COMMIT. Não temos aqui o mesmo detalhe (accountId, valores) que a
+      // checagem em app dá — é justamente o preço de ser uma rede de
+      // segurança que não depende do código estar certo.
+      throw new AppError(422, "insufficient_funds", {
+        reason: "balance_constraint_violated",
+      });
     }
     throw err;
   }
@@ -213,34 +243,38 @@ export async function reverseTransaction(
   }
 }
 
-// Não confiamos em "checar antes de inserir" — duas requisições concorrentes
-// com a mesma idempotencyKey passariam pela checagem antes de qualquer uma
-// commitar. A UNIQUE constraint no banco é o árbitro real; aqui só reagimos
-// a ela.
-function isUniqueViolation(err: unknown): boolean {
-  // o driver (postgres.js) lança o erro real como `cause` de um
-  // DrizzleQueryError — o código do Postgres mora em err.cause.code.
+// o driver (postgres.js) lança o erro real como `cause` de um
+// DrizzleQueryError — o código do Postgres mora em err.cause.code.
+function postgresErrorCode(err: unknown): string | undefined {
   const cause =
     typeof err === "object" && err !== null && "cause" in err
       ? (err as { cause?: unknown }).cause
       : err;
 
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    (cause as { code?: string }).code === UNIQUE_VIOLATION
-  );
+  return typeof cause === "object" && cause !== null
+    ? (cause as { code?: string }).code
+    : undefined;
 }
 
-async function loadByIdempotencyKey(idempotencyKey: string) {
+// Não confiamos em "checar antes de inserir" — duas requisições concorrentes
+// com a mesma idempotencyKey passariam pela checagem antes de qualquer uma
+// commitar. A UNIQUE constraint no banco é o árbitro real; aqui só reagimos
+// a ela.
+function isUniqueViolation(err: unknown): boolean {
+  return postgresErrorCode(err) === UNIQUE_VIOLATION;
+}
+
+function isCheckViolation(err: unknown): boolean {
+  return postgresErrorCode(err) === CHECK_VIOLATION;
+}
+
+async function tryLoadByIdempotencyKey(idempotencyKey: string) {
   const transaction = await db.query.transactions.findFirst({
     where: eq(transactions.idempotencyKey, idempotencyKey),
   });
 
   if (!transaction) {
-    // Não deveria acontecer: só chegamos aqui depois de um unique violation
-    // nessa mesma chave.
-    throw new Error("unique violation sem transação correspondente");
+    return undefined;
   }
 
   const transactionEntries = await db.query.entries.findMany({
@@ -250,12 +284,33 @@ async function loadByIdempotencyKey(idempotencyKey: string) {
   return { transaction, entries: transactionEntries, replayed: true };
 }
 
+async function loadByIdempotencyKey(idempotencyKey: string) {
+  const existing = await tryLoadByIdempotencyKey(idempotencyKey);
+
+  if (!existing) {
+    // Não deveria acontecer: só chegamos aqui depois de um unique violation
+    // nessa mesma chave.
+    throw new Error("unique violation sem transação correspondente");
+  }
+
+  return existing;
+}
+
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Atualiza balances no MESMO commit das entries — se um cair, os dois caem.
-// O UPDATE (via onConflictDoUpdate) pega um lock de linha por conta, na
-// mesma ordem sempre (accountId ordenado), pra evitar deadlock entre duas
-// transações concorrentes que tocam as mesmas contas em ordem trocada.
+// O UPDATE pega um lock de linha por conta, na mesma ordem sempre
+// (accountId ordenado), pra evitar deadlock entre duas transações
+// concorrentes que tocam as mesmas contas em ordem trocada.
+//
+// Não usa `INSERT ... ON CONFLICT DO UPDATE` (upsert em uma linha só) —
+// pegadinha do Postgres: com `balances_current_balance_non_negative`, o
+// CHECK é validado contra o valor LITERAL do `VALUES()` antes de resolver o
+// conflito, mesmo quando o resultado final do `DO UPDATE` seria válido. Um
+// débito de conta com saldo alto (delta negativo, resultado final
+// positivo) falhava o CHECK na tentativa especulativa de INSERT, mesmo já
+// existindo a linha. UPDATE primeiro evita isso: o CHECK aí valida o valor
+// já somado (`current_balance + delta`), que é o que realmente importa.
 async function applyBalanceDeltas(
   tx: Tx,
   createdEntries: (typeof entries.$inferSelect)[],
@@ -273,16 +328,80 @@ async function applyBalanceDeltas(
 
   for (const accountId of accountIds) {
     const delta = deltaByAccount.get(accountId) as number;
-    await tx
-      .insert(balances)
-      .values({ accountId, currentBalance: delta, updatedAt: new Date() })
-      .onConflictDoUpdate({
-        target: balances.accountId,
-        set: {
-          currentBalance: sql`${balances.currentBalance} + ${delta}`,
-          updatedAt: new Date(),
-        },
+    await applyBalanceDelta(tx, accountId, delta);
+  }
+}
+
+async function applyBalanceDelta(tx: Tx, accountId: string, delta: number) {
+  const updated = await tx
+    .update(balances)
+    .set({
+      currentBalance: sql`${balances.currentBalance} + ${delta}`,
+      updatedAt: new Date(),
+    })
+    .where(eq(balances.accountId, accountId))
+    .returning({ accountId: balances.accountId });
+
+  if (updated.length === 0) {
+    // primeira entry desta conta — ainda não existe linha em `balances`
+    // pra atualizar. Só chega aqui com delta negativo se
+    // `assertSufficientFundsLocked` tiver um bug (uma conta sem linha em
+    // `balances` tem saldo implícito 0, que já rejeitaria qualquer débito
+    // antes de chegar aqui) — nesse caso o CHECK constraint recusa o
+    // INSERT, que é o comportamento certo mesmo sem essa garantia.
+    await tx.insert(balances).values({ accountId, currentBalance: delta, updatedAt: new Date() });
+  }
+}
+
+// Trava a linha de `balances` de cada conta debitada (SELECT ... FOR
+// UPDATE) e só então compara com o débito pedido — leitura e decisão na
+// mesma janela travada, dentro da transação que também vai gravar. Uma
+// segunda transação concorrente que tente travar a mesma conta espera aqui
+// até essa transação commitar ou dar rollback; não há mais janela pra ler
+// um saldo desatualizado. Contas debitadas ficam ordenadas por accountId,
+// mesma ordem de `applyBalanceDeltas`, pra nunca inverter a ordem de lock
+// entre duas transações concorrentes que tocam as mesmas contas (deadlock).
+//
+// Limitação conhecida: se a conta nunca recebeu nenhuma entry, não existe
+// linha em `balances` pra travar — a primeira `INSERT` (em
+// `applyBalanceDeltas`) só acontece depois. Duas primeiras transações
+// concorrentes debitando a mesma conta nova ainda podem colidir; na
+// prática isso não importa aqui porque a constraint
+// `balances_current_balance_non_negative` barra o resultado de qualquer
+// jeito.
+async function assertSufficientFundsLocked(
+  tx: Tx,
+  inputEntries: CreateTransactionInput["entries"],
+) {
+  const debitByAccount = new Map<string, number>();
+  for (const entry of inputEntries) {
+    if (entry.direction === "debit") {
+      debitByAccount.set(
+        entry.accountId,
+        (debitByAccount.get(entry.accountId) ?? 0) + entry.amount,
+      );
+    }
+  }
+
+  const accountIds = [...debitByAccount.keys()].sort();
+
+  for (const accountId of accountIds) {
+    const debitAmount = debitByAccount.get(accountId) as number;
+
+    const [row] = await tx
+      .select({ balance: balances.currentBalance })
+      .from(balances)
+      .where(eq(balances.accountId, accountId))
+      .for("update");
+
+    const balance = row?.balance ?? 0;
+    if (balance < debitAmount) {
+      throw new AppError(422, "insufficient_funds", {
+        accountId,
+        balance,
+        debitAmount,
       });
+    }
   }
 }
 
