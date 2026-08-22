@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { AppError } from "../../http/error-handler.js";
-import { UUID_RE } from "../ledger/validate.js";
+import { parseReverseTransactionInput, UUID_RE } from "../ledger/validate.js";
 import {
   createPixCharge,
   createPixKey,
   getPixCharge,
   payPixCharge,
+  refundPixPayment,
 } from "./service.js";
 import {
   parseCreatePixChargeInput,
@@ -49,6 +50,32 @@ pixRouter.post("/pix/pay", async (req, res, next) => {
     next(err);
   }
 });
+
+pixRouter.post(
+  "/pix/payments/:transactionId/refund",
+  async (req, res, next) => {
+    try {
+      const { transactionId } = req.params;
+      if (!transactionId || !UUID_RE.test(transactionId)) {
+        throw new AppError(
+          400,
+          "invalid_request",
+          "transactionId precisa ser um uuid",
+        );
+      }
+
+      const { idempotencyKey } = parseReverseTransactionInput(req.body);
+      const result = await refundPixPayment(transactionId, idempotencyKey);
+
+      res.status(result.replayed ? 200 : 201).json({
+        transaction: result.transaction,
+        entries: result.entries,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // Simula o "scan" do QR: devolve o payload decodificado a partir do txid.
 pixRouter.get("/pix/charges/:id", async (req, res, next) => {

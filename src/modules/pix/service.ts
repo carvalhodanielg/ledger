@@ -1,8 +1,8 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { accounts, pixCharges, pixKeys } from "../../db/schema.js";
+import { accounts, pixCharges, pixKeys, transactions } from "../../db/schema.js";
 import { AppError } from "../../http/error-handler.js";
-import { createTransaction } from "../ledger/service.js";
+import { createTransaction, reverseTransaction } from "../ledger/service.js";
 import type {
   CreatePixChargeInput,
   CreatePixKeyInput,
@@ -172,6 +172,33 @@ function resolvePaymentAmount(
   }
 
   return inputAmount;
+}
+
+// Estorno de pagamento Pix não é lógica nova — é a MESMA reversão da
+// Semana 2, chamada aqui só depois de confirmar que a transação alvo é um
+// pagamento Pix (metadata.type). Isso existe pra separar responsabilidade
+// de endpoint, não pra reforçar regra financeira: `POST
+// /transactions/:id/reverse` já reverte qualquer transação; este endpoint
+// é a tradução "Pix" desse mesmo recurso, e recusa reverter transações que
+// não vieram de um pagamento Pix.
+export async function refundPixPayment(
+  transactionId: string,
+  idempotencyKey: string,
+) {
+  const original = await db.query.transactions.findFirst({
+    where: eq(transactions.id, transactionId),
+  });
+
+  if (!original) {
+    throw new AppError(404, "transaction_not_found", { transactionId });
+  }
+
+  const metadata = original.metadata as { type?: string } | null;
+  if (metadata?.type !== "pix_payment") {
+    throw new AppError(422, "not_a_pix_payment", { transactionId });
+  }
+
+  return reverseTransaction(transactionId, idempotencyKey);
 }
 
 export async function getPixCharge(chargeId: string) {

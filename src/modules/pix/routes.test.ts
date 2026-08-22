@@ -348,3 +348,134 @@ describe("POST /pix/pay", () => {
     expect(res.body.error).toBe("pix_charge_not_found");
   });
 });
+
+describe("POST /pix/payments/:transactionId/refund", () => {
+  async function createPixKeyFor(account: { id: string }) {
+    const res = await request(app).post("/pix/keys").send({
+      accountId: account.id,
+      keyType: "random",
+      keyValue: crypto.randomUUID(),
+    });
+    return res.body;
+  }
+
+  async function payCharge(payer: { id: string }, payee: { id: string }) {
+    const pixKey = await createPixKeyFor(payee);
+    const charge = await request(app).post("/pix/charges").send({
+      pixKeyId: pixKey.id,
+      amountType: "fixed",
+      amount: 1500,
+    });
+
+    return request(app).post("/pix/pay").send({
+      chargeId: charge.body.charge.id,
+      payerAccountId: payer.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  }
+
+  it("estorna um pagamento Pix, devolvendo o saldo ao estado anterior", async () => {
+    const payer = await createAccount();
+    await fundAccount(payer.id, 5000);
+    const payee = await createAccount();
+
+    const payment = await payCharge(payer, payee);
+    expect(payment.status).toBe(201);
+
+    const res = await request(app)
+      .post(`/pix/payments/${payment.body.transaction.id}/refund`)
+      .send({ idempotencyKey: crypto.randomUUID() });
+
+    expect(res.status).toBe(201);
+    expect(
+      res.body.entries.find((e: { accountId: string }) => e.accountId === payer.id),
+    ).toMatchObject({ direction: "credit", amount: 1500 });
+    expect(
+      res.body.entries.find((e: { accountId: string }) => e.accountId === payee.id),
+    ).toMatchObject({ direction: "debit", amount: 1500 });
+
+    const payerBalance = await request(app).get(`/accounts/${payer.id}/balance`);
+    expect(payerBalance.body.balance).toBe(5000);
+    const payeeBalance = await request(app).get(`/accounts/${payee.id}/balance`);
+    expect(payeeBalance.body.balance).toBe(0);
+  });
+
+  it("é idempotente: repetir a mesma idempotencyKey não estorna duas vezes", async () => {
+    const payer = await createAccount();
+    await fundAccount(payer.id, 5000);
+    const payee = await createAccount();
+
+    const payment = await payCharge(payer, payee);
+    const idempotencyKey = crypto.randomUUID();
+
+    const first = await request(app)
+      .post(`/pix/payments/${payment.body.transaction.id}/refund`)
+      .send({ idempotencyKey });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post(`/pix/payments/${payment.body.transaction.id}/refund`)
+      .send({ idempotencyKey });
+    expect(second.status).toBe(200);
+    expect(second.body.transaction.id).toBe(first.body.transaction.id);
+  });
+
+  it("rejeita estornar a mesma transação duas vezes com chaves diferentes", async () => {
+    const payer = await createAccount();
+    await fundAccount(payer.id, 5000);
+    const payee = await createAccount();
+
+    const payment = await payCharge(payer, payee);
+
+    const first = await request(app)
+      .post(`/pix/payments/${payment.body.transaction.id}/refund`)
+      .send({ idempotencyKey: crypto.randomUUID() });
+    expect(first.status).toBe(201);
+
+    const second = await request(app)
+      .post(`/pix/payments/${payment.body.transaction.id}/refund`)
+      .send({ idempotencyKey: crypto.randomUUID() });
+
+    expect(second.status).toBe(409);
+    expect(second.body.error).toBe("transaction_already_reversed");
+  });
+
+  it("rejeita estornar uma transação que não é um pagamento Pix", async () => {
+    const from = await createAccount();
+    await fundAccount(from.id, 5000);
+    const to = await createAccount();
+
+    const transaction = await request(app).post("/transactions").send({
+      idempotencyKey: crypto.randomUUID(),
+      entries: [
+        { accountId: from.id, direction: "debit", amount: 1000 },
+        { accountId: to.id, direction: "credit", amount: 1000 },
+      ],
+    });
+    expect(transaction.status).toBe(201);
+
+    const res = await request(app)
+      .post(`/pix/payments/${transaction.body.transaction.id}/refund`)
+      .send({ idempotencyKey: crypto.randomUUID() });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("not_a_pix_payment");
+  });
+
+  it("rejeita estornar transactionId inexistente", async () => {
+    const res = await request(app)
+      .post("/pix/payments/00000000-0000-0000-0000-000000000000/refund")
+      .send({ idempotencyKey: crypto.randomUUID() });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("transaction_not_found");
+  });
+
+  it("rejeita transactionId inválido", async () => {
+    const res = await request(app)
+      .post("/pix/payments/nao-uuid/refund")
+      .send({ idempotencyKey: crypto.randomUUID() });
+
+    expect(res.status).toBe(400);
+  });
+});

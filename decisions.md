@@ -645,3 +645,34 @@ requisito, é uma coluna nova em `pix_charges` mais uma checagem em
 Suíte total: 50 testes passando (8 novos cobrindo `POST /pix/pay`: fixa,
 aberta, amount divergente, amount ausente, saldo insuficiente, pagar a
 própria chave, idempotência, charge inexistente).
+
+## 2026-08-22 — Estorno de Pix (Semana 4, Dia 5): zero lógica nova
+
+**`POST /pix/payments/:transactionId/refund` não reimplementa reversão —
+chama `reverseTransaction` da Semana 2 direto**, exatamente como `pay`
+chama `createTransaction`. A única coisa que o módulo Pix decide aqui é
+`transactionId -> pode ser estornado por essa rota?`, respondendo `422
+not_a_pix_payment` se a transação não tiver `metadata.type ===
+"pix_payment"`. Toda a mecânica de estorno em si (transação espelhada,
+saldo voltando ao normal, idempotência, e a UNIQUE constraint
+`transactions_reversal_of_unique_idx` barrando reversão dupla com `409
+transaction_already_reversed`) já existia e não foi tocada.
+
+**Por que uma checagem de tipo em vez de deixar `/transactions/:id/reverse`
+cobrir tudo:** o endpoint genérico do ledger continua existindo e reverte
+qualquer transação — isso não muda. A rota Pix é só a "porta de entrada"
+que um cliente Pix (app, integração) usaria; recusar estornar algo que não
+veio de um pagamento Pix evita que essa porta vire um jeito alternativo de
+chamar reversão genérica por engano, mas não é uma regra de segurança nem
+financeira — é só a tradução da Semana 4 fazendo o que ela deveria fazer:
+apontar pro motor certo.
+
+**`idempotencyKey` do estorno é reaproveitado do corpo já validado por
+`parseReverseTransactionInput` do módulo ledger** — não duplicado no
+módulo Pix, mesmo raciocínio de "não duplicar lógica" aplicado a
+validação de shape, não só a regra de negócio.
+
+Suíte total: 56 testes passando (6 novos cobrindo o refund: estorno
+correto com saldo voltando ao original, idempotência, estorno duplicado
+com chaves diferentes rejeitado, transação que não é pagamento Pix
+rejeitada, transactionId inexistente, transactionId inválido).
