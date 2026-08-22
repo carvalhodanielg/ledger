@@ -191,17 +191,17 @@ describe("concorrência — idempotencyKey repetida", () => {
     const transactionIds = new Set(responses.map((r) => r.body.transaction.id));
     expect(transactionIds.size).toBe(1);
 
-    const [{ count: transactionCount }] = await sql<{ count: string }[]>`
+    const transactionCountRows = await sql<{ count: string }[]>`
       select count(*) as count from transactions where idempotency_key = ${idempotencyKey}
     `;
-    expect(Number(transactionCount)).toBe(1);
+    expect(Number(transactionCountRows[0]!.count)).toBe(1);
 
-    const [{ count: entryCount }] = await sql<{ count: string }[]>`
+    const entryCountRows = await sql<{ count: string }[]>`
       select count(*) as count from entries e
       join transactions t on t.id = e.transaction_id
       where t.idempotency_key = ${idempotencyKey}
     `;
-    expect(Number(entryCount)).toBe(2);
+    expect(Number(entryCountRows[0]!.count)).toBe(2);
 
     const finalBalanceSource = await getEntriesSum(source.id);
     expect(finalBalanceSource).toBe(INITIAL_BALANCE - AMOUNT);
