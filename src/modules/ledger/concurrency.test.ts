@@ -139,3 +139,71 @@ describe("concorrência — transferências simultâneas da mesma conta", () => 
     expect(finalBalanceSource).toBeGreaterThanOrEqual(0);
   });
 });
+
+// Semana 3, Dia 5: os testes existentes de idempotência (routes.test.ts)
+// provam o caso sequencial — a segunda chamada só é disparada depois que a
+// primeira já commitou. Isso não exercita a race real: duas requisições com
+// a mesma idempotencyKey chegando ao mesmo tempo passam as duas pelo
+// `tryLoadByIdempotencyKey` ANTES de qualquer uma commitar (nenhuma vê a
+// outra ainda), então as duas tentam o INSERT. A garantia de "só uma vez"
+// não pode vir dessa checagem — tem que vir da UNIQUE constraint no banco e
+// do catch em `createTransaction` que devolve a transação já commitada pra
+// quem perdeu a corrida (service.ts, `isUniqueViolation`).
+describe("concorrência — idempotencyKey repetida", () => {
+  it("N requisições simultâneas com a mesma idempotencyKey criam a transação uma única vez", async () => {
+    const source = await createAccount();
+    const destination = await createAccount();
+
+    const INITIAL_BALANCE = 100_000;
+    const REQUEST_COUNT = 20;
+    const AMOUNT = 3_000;
+    const idempotencyKey = "idempotency-race-key";
+
+    await fundAccount(source.id, INITIAL_BALANCE);
+
+    const responses = await Promise.all(
+      Array.from({ length: REQUEST_COUNT }, () =>
+        request(app)
+          .post("/transactions")
+          .send({
+            idempotencyKey,
+            entries: [
+              { accountId: source.id, direction: "debit", amount: AMOUNT },
+              { accountId: destination.id, direction: "credit", amount: AMOUNT },
+            ],
+          }),
+      ),
+    );
+
+    // 201 pra quem "ganhou" a corrida (criou de fato), 200 pra quem colidiu
+    // na UNIQUE constraint e recebeu o replay — nunca outra coisa.
+    const otherStatusCodes = responses
+      .filter((r) => r.status !== 201 && r.status !== 200)
+      .map((r) => r.status);
+    expect(otherStatusCodes).toEqual([]);
+    expect(responses.filter((r) => r.status === 201).length).toBe(1);
+    expect(responses.filter((r) => r.status === 200).length).toBe(
+      REQUEST_COUNT - 1,
+    );
+
+    // Todas as respostas devem apontar pra exatamente a mesma transação —
+    // não pra N transações diferentes que por acaso deram certo.
+    const transactionIds = new Set(responses.map((r) => r.body.transaction.id));
+    expect(transactionIds.size).toBe(1);
+
+    const [{ count: transactionCount }] = await sql<{ count: string }[]>`
+      select count(*) as count from transactions where idempotency_key = ${idempotencyKey}
+    `;
+    expect(Number(transactionCount)).toBe(1);
+
+    const [{ count: entryCount }] = await sql<{ count: string }[]>`
+      select count(*) as count from entries e
+      join transactions t on t.id = e.transaction_id
+      where t.idempotency_key = ${idempotencyKey}
+    `;
+    expect(Number(entryCount)).toBe(2);
+
+    const finalBalanceSource = await getEntriesSum(source.id);
+    expect(finalBalanceSource).toBe(INITIAL_BALANCE - AMOUNT);
+  });
+});

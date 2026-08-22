@@ -530,3 +530,33 @@ sempre processa na mesma ordem relativa e sempre para no mesmo ponto.
 
 Suíte total: 32 testes passando (o antes vermelho-por-design agora fica
 verde de forma consistente).
+
+## 2026-08-22 — Semana 3, Dia 5: idempotência sob concorrência real
+
+**Lacuna que os testes existentes deixavam:** `routes.test.ts` já provava
+idempotência, mas só de forma sequencial — a segunda chamada só disparava
+depois que a primeira já tinha commitado. Isso não exercita a race de
+verdade: duas requisições com a mesma `idempotencyKey` chegando ao mesmo
+tempo passam AMBAS por `tryLoadByIdempotencyKey` antes de qualquer uma
+commitar (nenhuma vê a outra ainda), então as duas tentam o `INSERT`. A
+garantia de "só uma vez" não pode vir dessa checagem — só pode vir da
+`UNIQUE` constraint no banco e do `catch`/`isUniqueViolation` em
+`createTransaction` (`service.ts`), que devolve a transação já commitada
+pra quem perde a corrida.
+
+**Teste novo** (`concurrency.test.ts`, mesmo arquivo e padrão do teste de
+saldo — `Promise.all`, supertest contra `app`, banco real): 20 requisições
+`POST /transactions` simultâneas, todas com a mesma `idempotencyKey`.
+Asserts: exatamente 1 resposta `201` (quem ganhou a corrida e criou de
+fato) e as outras 19 `200` (replay); todas as respostas apontam pro mesmo
+`transaction.id`; exatamente 1 linha em `transactions` com essa chave;
+exatamente 2 `entries` associadas a ela (débito + crédito, não 40); saldo
+final da conta de origem reflete um único débito, não vinte.
+
+Rodado 3+ vezes seguidas, sempre com o mesmo resultado — determinístico,
+como esperado de uma garantia que vem de constraint de banco, não de
+checagem em aplicação.
+
+Suíte total: 32 testes passando. Fecha a Semana 3 do roadmap por completo
+(Dias 1-2 reproduzir, 3-4 proteger contra saldo negativo, 5 idempotência
+sob concorrência).
