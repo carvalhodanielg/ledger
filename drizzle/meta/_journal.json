@@ -22,6 +22,13 @@
       "when": 1787281065756,
       "tag": "0002_amused_angel",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787434545532,
+      "tag": "0003_clear_khan",
+      "breakpoints": true
     }
   ]
 }

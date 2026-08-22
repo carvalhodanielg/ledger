@@ -242,6 +242,10 @@ O que precisa estar lá:
 - O antes/depois do teste de concorrência, com números: "sem proteção, X de
   Y execuções resultaram em saldo negativo; com a proteção implementada, 0
   de 1000"
+- verificar a possibilidade de criar um frontend bem visual pra mostrar o sistema em operaçao, criar
+conta, fazer transferencias, alem disso, seria interessante algo bem visual e explicativo nesse front 
+pra explicar e entender o motor por tras da partida dobrado, o que ta acontecendo de validação, no banco, o fluxo, etc/
+*(Pra isso do front precisamos avaliar melhor o que e como fazer da melhor forma.)
 
 **Fundamental — visual do antes/depois pra apresentar o projeto:** o
 número em texto no README já é suficiente como evidência técnica, mas se

@@ -121,6 +121,77 @@ export const entries = pgTable(
 // exatamente esse recálculo que vira a rotina de reconciliação da Semana 5.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// pix_keys — camada de tradução (Semana 4). Não guarda saldo nem lógica
+// financeira, só o apelido que resolve pra uma conta do motor de ledger.
+// ---------------------------------------------------------------------------
+
+export const pixKeyTypeEnum = pgEnum("pix_key_type", [
+  "cpf",
+  "cnpj",
+  "email",
+  "phone",
+  "random",
+]);
+
+export const pixKeys = pgTable(
+  "pix_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "restrict" }),
+    keyType: pixKeyTypeEnum("key_type").notNull(),
+    // valor bruto da chave (cpf, email, etc). Único GLOBALMENTE, não só por
+    // conta ou por tipo — é assim que Pix funciona de verdade: uma chave
+    // aponta pra exatamente uma conta em todo o sistema, senão pagar nela
+    // seria ambíguo.
+    keyValue: text("key_value").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("pix_keys_key_value_idx").on(table.keyValue),
+    index("pix_keys_account_id_idx").on(table.accountId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// pix_charges — a "cobrança" por trás de um QR code. Guarda só o suficiente
+// pra reconstruir o payload do QR e, na Semana 4 Dias 3-4, resolver o
+// pagamento de volta pra uma pix_key (e portanto uma conta). Nunca guarda
+// nada que decida saldo — isso é 100% do motor de transactions/entries.
+// ---------------------------------------------------------------------------
+
+export const pixChargeAmountTypeEnum = pgEnum("pix_charge_amount_type", [
+  "fixed",
+  "open",
+]);
+
+export const pixCharges = pgTable(
+  "pix_charges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pixKeyId: uuid("pix_key_id")
+      .notNull()
+      .references(() => pixKeys.id, { onDelete: "restrict" }),
+    amountType: pixChargeAmountTypeEnum("amount_type").notNull(),
+    // presente apenas em cobranças "fixed" — QR estático de valor fechado.
+    // NULL em "open" — QR de valor em aberto, quem paga decide quanto.
+    amount: bigint("amount", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    check(
+      "pix_charges_amount_matches_type",
+      sql`(${table.amountType} = 'fixed' and ${table.amount} > 0) or (${table.amountType} = 'open' and ${table.amount} is null)`,
+    ),
+  ],
+);
+
 export const balances = pgTable(
   "balances",
   {

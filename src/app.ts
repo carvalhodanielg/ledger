@@ -2,6 +2,7 @@ import express from "express";
 import { sql } from "./db/client.js";
 import { errorHandler } from "./http/error-handler.js";
 import { ledgerRouter } from "./modules/ledger/routes.js";
+import { pixRouter } from "./modules/pix/routes.js";
 
 export const app = express();
 
@@ -17,5 +18,6 @@ app.get("/health", async (_req, res, next) => {
 });
 
 app.use(ledgerRouter);
+app.use(pixRouter);
 
 app.use(errorHandler);

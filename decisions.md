@@ -560,3 +560,88 @@ checagem em aplicação.
 Suíte total: 32 testes passando. Fecha a Semana 3 do roadmap por completo
 (Dias 1-2 reproduzir, 3-4 proteger contra saldo negativo, 5 idempotência
 sob concorrência).
+
+## 2026-08-22 — Semana 4, Dias 1-2: chaves Pix e QR code
+
+**Chave Pix é única globalmente, não por conta nem por tipo.** Modelada
+como `UNIQUE` em `pix_keys.key_value` sozinho (não um índice composto com
+`account_id` ou `key_type`). É assim que Pix funciona de verdade: uma
+chave aponta pra exatamente uma conta em todo o sistema — se duas contas
+pudessem reivindicar o mesmo valor, pagar nela seria ambíguo. A rota
+`POST /pix/keys` não faz "checar se existe, depois inserir": deixa o
+`INSERT` ir e traduz a violação da UNIQUE constraint (`23505`) em `409
+pix_key_already_in_use`, mesmo princípio já usado pra `idempotency_key`
+em `transactions` — duas requisições concorrentes registrando a mesma
+chave não podem confiar numa checagem prévia.
+
+**QR code é modelado como entidade persistida (`pix_charges`), não como
+payload efêmero gerado na hora.** Alternativa descartada: calcular o JSON
+do QR só em memória a partir de `pixKeyId` + `amount`, sem gravar nada.
+Isso bastaria pro critério de pronto de "gerar um QR referenciando uma
+chave" (Dias 1-2), mas quebraria o que vem depois: `pay` (Dias 3-4)
+precisa resolver um QR escaneado de volta pra uma cobrança específica por
+`txid`, e cobrança de valor aberto só faz sentido se existir um registro
+que sobrevive entre "gerar o QR" e "alguém pagar" (não dá pra recalcular
+um payload que já foi entregue a quem vai pagar). `pix_charges.id` dobra
+como o `txid` do payload.
+
+**QR estático (`amountType: "fixed"`) vs dinâmico (`amountType: "open"`)
+muda o que existe no payload, não a validação de quem paga (isso é
+trabalho de Dias 3-4).** `amount` é obrigatório e `> 0` quando `fixed`
+(valor fechado, quem escaneia não escolhe); é sempre `NULL` quando `open`
+(quem paga decide o valor no momento de pagar). Validação em duas camadas,
+mesmo padrão do resto do projeto: `validate.ts` rejeita a combinação errada
+com 400 antes de tocar o banco, e a constraint `pix_charges_amount_matches_type`
+recusa o mesmo caso a nível de banco, independente do código da aplicação
+estar certo.
+
+**O módulo `pix` não decide nada financeiro — só resolve chave → conta e
+monta/decodifica o payload do QR.** Nenhuma entry, nenhuma transaction,
+nenhum saldo é tocado em `src/modules/pix/*`. `createPixCharge` e
+`getPixCharge` leem `pix_keys`/`pix_charges` e devolvem o payload; a
+lógica de pagamento (Dias 3-4) vai chamar `createTransaction` do módulo
+`ledger`, nunca reimplementar débito/crédito aqui — reforça o princípio do
+CLAUDE.md.
+
+Suíte total: 42 testes passando (10 novos cobrindo `POST /pix/keys`,
+`POST /pix/charges`, `GET /pix/charges/:id`).
+
+## 2026-08-22 — Semana 4, Dias 3-4: `POST /pix/pay`
+
+**`pay` resolve `chargeId` → `pixKey` → conta destino e decide o `amount`,
+e chama `createTransaction` do módulo `ledger` — não escreve nenhum
+`insert` em `entries`/`balances`.** Duas entries: débito na conta de quem
+paga, crédito na conta dona da chave. Saldo insuficiente, contas
+inexistentes e balanceamento continuam sendo responsabilidade exclusiva do
+motor de ledger; o módulo pix só traduz. `idempotencyKey` do payload de
+pay é a mesma usada pelo motor — repetir a chamada com a mesma chave
+devolve a transação já criada (`replayed: true`, HTTP 200), sem mover
+dinheiro de novo, herdado de graça de `createTransaction`.
+
+**`amount` é resolvido a partir do tipo da cobrança, não aceito cru do
+payer.** Cobrança `fixed`: usa `charge.amount`; se o payer mandar um
+`amount` diferente, `422 amount_does_not_match_charge` (mandar o mesmo
+valor é aceito, é redundante mas não incoerente). Cobrança `open`: exige
+`amount` no payload (`422 amount_required` se ausente) — é o payer quem
+decide quanto pagar numa cobrança de valor em aberto, por definição.
+
+**Pagar a própria chave é rejeitado (`422 cannot_pay_own_charge`).** Sem
+essa checagem, `createTransaction` receberia duas entries na mesma conta
+(débito e crédito de mesmo valor) — tecnicamente balanceado, mas sem
+sentido de produto (transferência de uma conta pra ela mesma) e sem
+handling explícito de "mesma conta duas vezes numa transação" no motor de
+ledger. Melhor recusar aqui, na camada de tradução, do que deixar o motor
+decidir algo que não é da conta dele.
+
+**Decisão consciente de escopo: `pix_charges` não tem campo de status
+(ex: `paid`), então nada impede pagar a mesma cobrança mais de uma vez com
+`idempotencyKey`s diferentes.** Isso replica como QR estático de boleto
+funciona em produção de verdade (controle de pagamento único fica em outra
+camada, não no QR em si) e o roadmap não pede rastrear estado da cobrança
+— só que `pay` chame o motor certo e gere as entries certas. Se isso virar
+requisito, é uma coluna nova em `pix_charges` mais uma checagem em
+`payPixCharge`, sem tocar no motor de ledger.
+
+Suíte total: 50 testes passando (8 novos cobrindo `POST /pix/pay`: fixa,
+aberta, amount divergente, amount ausente, saldo insuficiente, pagar a
+própria chave, idempotência, charge inexistente).
